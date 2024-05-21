@@ -17,6 +17,7 @@ from typing import Union, List
 from Cython.Build import cythonize
 
 from jmpy.log import logger
+from multiprocessing import Pool
 
 
 def get_package_dir(*args, **kwargs):
@@ -38,11 +39,18 @@ class TemporaryDirectory(object):
 
 def search(content, regexs):
     if isinstance(regexs, str):
-        return re.search(regexs, content)
+        try:
+            return re.search(regexs, content)
+        except re.error:
+            return re.search(re.escape(regexs), content)
 
     for regex in regexs:
-        if re.search(regex, content):
-            return True
+        try:
+            if re.search(regex, content):
+                return True
+        except re.error:
+            if re.search(re.escape(regex), content):
+                return True
 
 
 def walk_file(file_path):
@@ -116,35 +124,42 @@ def filter_cannot_encrypted_py(files, except_main_file):
 
 
 def encrypt_py(py_files: list):
-    encrypted_py = []
+    total_count = len(py_files)
+    try:
+        with Pool(8) as p:
+            encrypted_py = p.map(encrypt_file_task, [(pyf, i, total_count) for i, pyf in enumerate(py_files)])
+        return [ep for ep in encrypted_py if ep is not None]
+    except KeyboardInterrupt:
+        logger.debug(f'用户退出')
+        p.terminate()
+        p.join()
 
+
+def encrypt_file_task(args):
+    py_file, current_index, total_count = args
     with TemporaryDirectory() as td:
-        total_count = len(py_files)
-        for i, py_file in enumerate(py_files):
-            try:
-                dir_name = os.path.dirname(py_file)
-                file_name = os.path.basename(py_file)
+        try:
+            dir_name = os.path.dirname(py_file)
+            file_name = os.path.basename(py_file)
 
-                os.chdir(dir_name)
+            os.chdir(dir_name)
 
-                logger.debug("正在加密 {}/{},  {}".format(i + 1, total_count, file_name))
+            logger.debug("正在加密 {}/{},  {}".format(current_index + 1, total_count, file_name))
 
-                setup(
-                    ext_modules=cythonize([file_name], quiet=True, language_level=3),
-                    script_args=["build_ext", "-t", td, "--inplace"],
-                )
+            setup(
+                ext_modules=cythonize([file_name], quiet=True, language_level=3),
+                script_args=["build_ext", "-t", td, "--inplace"],
+            )
 
-                encrypted_py.append(py_file)
-                logger.debug("加密成功 {}".format(file_name))
+            logger.debug("加密成功 {}".format(file_name))
+            return py_file
 
-            except Exception as e:
-                logger.exception("加密失败 {} , error {}".format(py_file, e))
-                temp_c = py_file.replace(".py", ".c")
-                if os.path.exists(temp_c):
-                    os.remove(temp_c)
-
-        return encrypted_py
-
+        except Exception as e:
+            logger.exception("加密失败 {} , error {}".format(py_file, e))
+            temp_c = py_file.replace(".py", ".c")
+            if os.path.exists(temp_c):
+                os.remove(temp_c)
+        return None
 
 def delete_files(files_path):
     """
